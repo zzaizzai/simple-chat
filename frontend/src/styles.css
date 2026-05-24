@@ -183,6 +183,22 @@ h1 {
   border-color: rgba(255, 255, 255, 0.08);
 }
 
+.bubble.streaming {
+  position: relative;
+  overflow: hidden;
+}
+
+.bubble.streaming::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(120deg, transparent 0%, rgba(123, 167, 255, 0.14) 50%, transparent 100%);
+  transform: translateX(-100%);
+  animation: shimmer 2.2s infinite;
+  pointer-events: none;
+}
+
 .bubble-meta {
   font-size: 12px;
   text-transform: uppercase;
@@ -194,6 +210,58 @@ h1 {
 .bubble-text {
   white-space: pre-wrap;
   line-height: 1.65;
+  position: relative;
+  z-index: 1;
+}
+
+.streaming-stage {
+  margin-top: 14px;
+  display: grid;
+  gap: 10px;
+  position: relative;
+  z-index: 1;
+}
+
+.streaming-lines {
+  display: grid;
+  gap: 8px;
+}
+
+.streaming-lines span {
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(143, 180, 255, 0.1), rgba(143, 180, 255, 0.32), rgba(143, 180, 255, 0.1));
+  background-size: 200% 100%;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.streaming-lines span:nth-child(2) {
+  width: 82%;
+  animation-delay: 0.15s;
+}
+
+.streaming-lines span:nth-child(3) {
+  width: 64%;
+  animation-delay: 0.3s;
+}
+
+.streaming-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #c4d3ef;
+  font-size: 13px;
+}
+
+.streaming-status strong {
+  font-weight: 600;
+}
+
+.streaming-status span {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  letter-spacing: 0.18em;
+  color: #8db4ff;
 }
 
 .attachment-grid {
@@ -314,6 +382,27 @@ button[type='submit']:disabled {
   background: rgba(255, 84, 84, 0.14);
   border: 1px solid rgba(255, 84, 84, 0.25);
   color: #ffcece;
+}
+
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: translateX(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateX(8px);
+  }
 }
 
 @media (max-width: 720px) {

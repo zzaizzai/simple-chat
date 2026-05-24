@@ -9,6 +9,42 @@ const MODEL_OPTIONS = [
 
 const STORAGE_KEY = 'codex-demo-model';
 const DEFAULT_MODEL = MODEL_OPTIONS[0].value;
+const LOADING_TIPS = [
+  '모델이 답을 정리하는 중',
+  '문맥을 이어 붙이는 중',
+  '이미지와 질문을 함께 해석하는 중',
+  '문장을 조금씩 생성하는 중',
+];
+
+function parseSseChunk(buffer) {
+  const events = [];
+  const blocks = buffer.split('\n\n');
+  const rest = blocks.pop() || '';
+
+  for (const block of blocks) {
+    const lines = block.split('\n');
+    let eventType = 'message';
+    let dataLine = '';
+
+    for (const line of lines) {
+      if (line.startsWith('event:')) {
+        eventType = line.slice(6).trim();
+      }
+      if (line.startsWith('data:')) {
+        dataLine += line.slice(5).trim();
+      }
+    }
+
+    if (dataLine) {
+      events.push({
+        event: eventType,
+        data: JSON.parse(dataLine),
+      });
+    }
+  }
+
+  return { events, rest };
+}
 
 function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -39,6 +75,7 @@ export default function App() {
   const [error, setError] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [apiStatus, setApiStatus] = useState('checking');
+  const [streamFrame, setStreamFrame] = useState(0);
   const [selectedModel, setSelectedModel] = useState(() => {
     const stored = localStorage.getItem(STORAGE_KEY);
     return MODEL_OPTIONS.some((model) => model.value === stored) ? stored : DEFAULT_MODEL;
@@ -63,6 +100,19 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, selectedModel);
   }, [selectedModel]);
+
+  useEffect(() => {
+    if (!sending) {
+      setStreamFrame(0);
+      return undefined;
+    }
+
+    const timer = window.setInterval(() => {
+      setStreamFrame((current) => current + 1);
+    }, 700);
+
+    return () => window.clearInterval(timer);
+  }, [sending]);
 
   const currentModelLabel = useMemo(() => {
     return MODEL_OPTIONS.find((model) => model.value === selectedModel)?.label || selectedModel;
@@ -94,9 +144,19 @@ export default function App() {
       content: prompt.trim(),
       images: attachments,
     };
-
     const nextMessages = [...messages, userMessage];
-    setMessages(nextMessages);
+    const assistantIndex = nextMessages.length;
+
+    setMessages((current) => [
+      ...current,
+      userMessage,
+      {
+        role: 'assistant',
+        content: '',
+        images: [],
+        streaming: true,
+      },
+    ]);
     setPrompt('');
     setAttachments([]);
     setError('');
@@ -115,31 +175,82 @@ export default function App() {
       });
 
       if (!response.ok) {
-        const detail = await response.json().catch(() => ({}));
-        throw new Error(detail.detail || 'Failed to contact backend');
+        const detail = await response.text().catch(() => '');
+        throw new Error(detail || 'Failed to contact backend');
       }
 
-      const data = await response.json();
-      setApiStatus('ok');
-      setMessages((current) => [
-        ...current,
-        {
-          role: 'assistant',
-          content: data.reply,
-          images: [],
-        },
-      ]);
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      if (!reader) {
+        throw new Error('Streaming response is not available');
+      }
+
+      let done = false;
+      while (!done) {
+        const result = await reader.read();
+        done = result.done;
+        buffer += decoder.decode(result.value || new Uint8Array(), { stream: !done });
+
+        const parsed = parseSseChunk(buffer);
+        buffer = parsed.rest;
+
+        for (const item of parsed.events) {
+          if (item.event === 'delta') {
+            setMessages((current) => {
+              const next = [...current];
+              const target = next[assistantIndex];
+              if (target) {
+                next[assistantIndex] = {
+                  ...target,
+                  content: `${target.content || ''}${item.data.text}`,
+                };
+              }
+              return next;
+            });
+          }
+
+          if (item.event === 'meta') {
+            setApiStatus('ok');
+          }
+
+          if (item.event === 'done') {
+            setApiStatus('ok');
+            setMessages((current) => {
+              const next = [...current];
+              if (next[assistantIndex]) {
+                next[assistantIndex] = {
+                  role: 'assistant',
+                  content: item.data.reply,
+                  images: [],
+                  streaming: false,
+                };
+              }
+              return next;
+            });
+          }
+
+          if (item.event === 'error') {
+            throw new Error(item.data.error || 'Gemini request failed');
+          }
+        }
+      }
     } catch (requestError) {
       setApiStatus('error');
       setError(requestError.message || 'Unexpected error');
-      setMessages((current) => [
-        ...current,
-        {
-          role: 'assistant',
-          content: '요청 처리에 실패했습니다.',
-          images: [],
-        },
-      ]);
+      setMessages((current) => {
+        const next = [...current];
+        if (next[assistantIndex]) {
+          next[assistantIndex] = {
+            role: 'assistant',
+            content: '요청 처리에 실패했습니다.',
+            images: [],
+            streaming: false,
+          };
+        }
+        return next;
+      });
     } finally {
       setSending(false);
     }
@@ -156,7 +267,15 @@ export default function App() {
           </p>
         </div>
         <div className="hero-actions">
-          <div className={apiStatus === 'ok' ? 'status-pill status-ok' : apiStatus === 'error' ? 'status-pill status-error' : 'status-pill'}>
+          <div
+            className={
+              apiStatus === 'ok'
+                ? 'status-pill status-ok'
+                : apiStatus === 'error'
+                  ? 'status-pill status-error'
+                  : 'status-pill'
+            }
+          >
             {apiStatus === 'ok' ? '🟢 API OK' : apiStatus === 'error' ? '🔴 API ERROR' : '🟡 CHECKING'}
           </div>
           <button type="button" className="settings-button" onClick={() => setSettingsOpen((value) => !value)}>
@@ -194,6 +313,21 @@ export default function App() {
             <article key={`${message.role}-${index}`} className={`bubble ${message.role}`}>
               <div className="bubble-meta">{message.role === 'user' ? 'You' : 'Assistant'}</div>
               <div className="bubble-text">{message.content}</div>
+              {message.streaming ? (
+                <div className="streaming-stage">
+                  <div className="streaming-lines">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                  <div className="streaming-status">
+                    <strong>{LOADING_TIPS[streamFrame % LOADING_TIPS.length]}</strong>
+                    <span>
+                      {Array.from({ length: (streamFrame % 4) + 1 }, () => '·').join('')}
+                    </span>
+                  </div>
+                </div>
+              ) : null}
               {message.images.length > 0 ? (
                 <div className="attachment-grid">
                   {message.images.map((image, imageIndex) => (

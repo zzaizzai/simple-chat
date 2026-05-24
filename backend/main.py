@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Literal, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -47,6 +49,10 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     model: str
+
+
+class StreamErrorResponse(BaseModel):
+    error: str
 
 
 @dataclass(frozen=True)
@@ -99,13 +105,17 @@ def build_contents(messages: list[ChatMessage]) -> list[types.Content]:
     return contents
 
 
+def sse_event(event: str, payload: dict[str, object]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/api/chat", response_model=ChatResponse)
-def chat(payload: ChatRequest) -> ChatResponse:
+@app.post("/api/chat")
+def chat(payload: ChatRequest) -> StreamingResponse:
     if not payload.messages:
         raise HTTPException(status_code=400, detail="messages cannot be empty")
 
@@ -113,14 +123,25 @@ def chat(payload: ChatRequest) -> ChatResponse:
     contents = build_contents(payload.messages)
     model = payload.model or DEFAULT_MODEL
 
-    try:
-        response = client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT),
-        )
-    except Exception as exc:  # pragma: no cover - surface provider errors to client
-        raise HTTPException(status_code=502, detail=f"Gemini request failed: {exc}") from exc
+    def stream():
+        yield sse_event("meta", {"model": model})
 
-    reply = getattr(response, "text", "") or "No response text returned."
-    return ChatResponse(reply=reply, model=model)
+        try:
+            response_stream = client.models.generate_content_stream(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT),
+            )
+            accumulated = []
+            for chunk in response_stream:
+                delta = getattr(chunk, "text", "") or ""
+                if delta:
+                    accumulated.append(delta)
+                    yield sse_event("delta", {"text": delta})
+
+            full_text = "".join(accumulated).strip() or "No response text returned."
+            yield sse_event("done", {"reply": full_text, "model": model})
+        except Exception as exc:  # pragma: no cover - surface provider errors to client
+            yield sse_event("error", {"error": f"Gemini request failed: {exc}"})
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
